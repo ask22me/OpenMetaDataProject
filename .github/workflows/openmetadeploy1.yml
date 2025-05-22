@@ -1,0 +1,64 @@
+name: Backup OpenMetadata MySQL
+
+on:
+  schedule:
+    - cron: "0 1 * * *"  # every day at 1:00 AM UTC
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install Azure CLI
+        run: |
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Start Azure VM
+        run: |
+          az vm start --name ${{ secrets.VM_NAME }} --resource-group ${{ secrets.RESOURCE_GROUP }}
+
+      - name: Run MySQL Backup Script on Azure VM
+        run: |
+          az vm run-command invoke \
+            --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --name ${{ secrets.VM_NAME }} \
+            --command-id RunShellScript \
+            --scripts '
+              #!/bin/bash
+              CONTAINER_NAME="${{ secrets.CONTAINER_NAME }}"
+              DB_NAME="${{ secrets.MYSQL_DB }}"
+              DB_USER="${{ secrets.MYSQL_USER }}"
+              DB_PASS="${{ secrets.MYSQL_PASSWORD }}"
+              BACKUP_DIR="/home/azureuser/openmetadata/backups"
+              export TZ=Asia/Riyadh
+              TIMESTAMP=$(date +"%Y%m%d%H%M%S")
+              BACKUP_FILE="$BACKUP_DIR/openmetadata_mysqlbackup$TIMESTAMP.sql"
+
+              AZURE_CONTAINER="${{ secrets.AZURE_BLOB_CONTAINER }}"
+              AZURE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT }}"
+              AZURE_SAS_TOKEN="${{ secrets.AZURE_SAS_TOKEN }}"
+
+              mkdir -p "$BACKUP_DIR"
+
+              docker exec -t $CONTAINER_NAME mysqldump -u$DB_USER -p"$DB_PASS" $DB_NAME > "$BACKUP_FILE"
+
+              az storage blob upload \
+                --container-name "$AZURE_CONTAINER" \
+                --file "$BACKUP_FILE" \
+                --name "$(basename $BACKUP_FILE)" \
+                --account-name "$AZURE_ACCOUNT" \
+                --sas-token "$AZURE_SAS_TOKEN"
+
+              find "$BACKUP_DIR" -type f -name "*.sql" -mtime +3 -exec rm {} \;
+
+              echo "==== Backup Completed at $(date) ====" >> /home/azureuser/openmetadata/backup_openmetadata.log 2>&1
+            '
+
+      - name: Logout from Azure
+        run: az logout
